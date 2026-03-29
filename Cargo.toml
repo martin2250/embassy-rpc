@@ -1,0 +1,11 @@
+[package]
+name = "embassy-rpc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embassy-sync = "0.8"
+
+[dev-dependencies]
+embassy-sync = { version = "0.8", features = ["std"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
