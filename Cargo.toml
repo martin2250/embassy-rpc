@@ -10,4 +10,4 @@ embassy-sync = "0.8"
 
 [dev-dependencies]
 embassy-sync = { version = "0.8", features = ["std"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

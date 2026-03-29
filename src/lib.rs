@@ -30,6 +30,11 @@ pub struct RequestDroppedError;
 ///   slot. Design for one active request/response pair at a time.
 /// - **Multiple clients:** Several tasks may call [`request`](Self::request); additional callers
 ///   wait until the current RPC completes (including delivery of [`RequestDroppedError`]).
+/// - **Client cancellation:** If the async task awaiting [`Self::request`] is dropped (executor
+///   cancellation), the service releases the client slot once the in-flight RPC is fully finished
+///   (including after the server responds or drops [`ServedRequest`]). Dropping the client future
+///   after the request was queued but before the server takes it removes the queued request and
+///   frees the slot immediately.
 ///
 /// # Type parameters
 ///
@@ -51,6 +56,9 @@ where
 
 struct State<Req, Resp> {
     client_busy: bool,
+    /// Client [`RpcService::request`] future was dropped while waiting; server must finish without
+    /// delivering a response to that client.
+    client_abandoned: bool,
     waiting_client_slot_waker: Option<Waker>,
     waiting_client_response_waker: Option<Waker>,
     waiting_server_waker: Option<Waker>,
@@ -62,12 +70,73 @@ impl<Req, Resp> State<Req, Resp> {
     const fn new() -> Self {
         Self {
             client_busy: false,
+            client_abandoned: false,
             waiting_client_slot_waker: None,
             waiting_client_response_waker: None,
             waiting_server_waker: None,
             queued_request: None,
             queued_response: None,
         }
+    }
+}
+
+/// When dropped without [`Self::defuse`], cleans up after a cancelled [`RpcService::request`].
+struct InFlightGuard<'a, M, Req, Resp>
+where
+    M: RawMutex,
+{
+    service: &'a RpcService<M, Req, Resp>,
+    disarm: bool,
+}
+
+impl<'a, M, Req, Resp> InFlightGuard<'a, M, Req, Resp>
+where
+    M: RawMutex,
+{
+    fn new(service: &'a RpcService<M, Req, Resp>) -> Self {
+        Self {
+            service,
+            disarm: false,
+        }
+    }
+
+    fn defuse(mut self) {
+        self.disarm = true;
+        core::mem::forget(self);
+    }
+}
+
+impl<'a, M, Req, Resp> Drop for InFlightGuard<'a, M, Req, Resp>
+where
+    M: RawMutex,
+{
+    fn drop(&mut self) {
+        if self.disarm {
+            return;
+        }
+
+        self.service.state.lock(|state| {
+            let mut s = state.borrow_mut();
+            if let Some(req) = s.queued_request.take() {
+                drop(req);
+                s.client_abandoned = false;
+                s.client_busy = false;
+                if let Some(w) = s.waiting_client_slot_waker.take() {
+                    w.wake();
+                }
+                return;
+            }
+            if let Some(resp) = s.queued_response.take() {
+                drop(resp);
+                s.client_abandoned = false;
+                s.client_busy = false;
+                if let Some(w) = s.waiting_client_slot_waker.take() {
+                    w.wake();
+                }
+                return;
+            }
+            s.client_abandoned = true;
+        });
     }
 }
 
@@ -91,6 +160,13 @@ where
     ///
     /// Returns [`Err(RequestDroppedError)`](RequestDroppedError) if the server drops
     /// [`ServedRequest`] without calling [`ServedRequest::respond`].
+    ///
+    /// # Cancellation
+    ///
+    /// If this future is dropped while waiting for a response, the queued request is removed if
+    /// the server has not taken it yet; otherwise the server continues with [`ServedRequest`] and
+    /// the response is discarded when the server completes. The client slot becomes available again
+    /// after that completion (or immediately when the queued request is dropped).
     pub async fn request(&self, req: Req) -> Result<Resp, RequestDroppedError> {
         self.acquire_client_slot().await;
 
@@ -101,6 +177,8 @@ where
                 waker.wake();
             }
         });
+
+        let in_flight = InFlightGuard::new(self);
 
         let result = poll_fn(|cx| {
             self.state.lock(|state| {
@@ -119,6 +197,7 @@ where
         })
         .await;
 
+        in_flight.defuse();
         result
     }
 
@@ -165,6 +244,15 @@ where
     }
 }
 
+impl<M, Req, Resp> Default for RpcService<M, Req, Resp>
+where
+    M: RawMutex,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Server-side handle for one request taken from [`RpcService::serve`].
 ///
 /// Dereferences to the inner `Req` via [`Deref`] and [`DerefMut`] for ergonomic access.
@@ -198,9 +286,17 @@ where
     pub fn respond(mut self, resp: Resp) {
         self.state.lock(|state| {
             let mut state = state.borrow_mut();
-            state.queued_response = Some(Ok(resp));
-            if let Some(waker) = state.waiting_client_response_waker.take() {
-                waker.wake();
+            if state.client_abandoned {
+                state.client_abandoned = false;
+                state.client_busy = false;
+                if let Some(waker) = state.waiting_client_slot_waker.take() {
+                    waker.wake();
+                }
+            } else {
+                state.queued_response = Some(Ok(resp));
+                if let Some(waker) = state.waiting_client_response_waker.take() {
+                    waker.wake();
+                }
             }
         });
         let _ = self.req.take();
@@ -257,9 +353,17 @@ where
         if !self.completed {
             self.state.lock(|state| {
                 let mut state = state.borrow_mut();
-                state.queued_response = Some(Err(RequestDroppedError));
-                if let Some(waker) = state.waiting_client_response_waker.take() {
-                    waker.wake();
+                if state.client_abandoned {
+                    state.client_abandoned = false;
+                    state.client_busy = false;
+                    if let Some(waker) = state.waiting_client_slot_waker.take() {
+                        waker.wake();
+                    }
+                } else {
+                    state.queued_response = Some(Err(RequestDroppedError));
+                    if let Some(waker) = state.waiting_client_response_waker.take() {
+                        waker.wake();
+                    }
                 }
             });
         }

@@ -10,6 +10,7 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::join;
 use tokio::runtime::Builder;
+use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 
 fn run_on_main_named_thread<F>(f: F)
@@ -55,11 +56,7 @@ fn server_writes_through_client_buffer_slice() {
                 req.respond(());
             };
 
-            let client = async {
-                service
-                    .request(BufferRequest { buffer: &mut buf })
-                    .await
-            };
+            let client = async { service.request(BufferRequest { buffer: &mut buf }).await };
 
             let (_, r) = join!(server, client);
             r
@@ -183,5 +180,144 @@ fn concurrent_clients_are_serialized_and_complete() {
 
         assert_eq!(r1, Ok(11));
         assert_eq!(r2, Ok(21));
+    });
+}
+
+#[test]
+fn cancelled_client_before_server_takes_request_releases_slot() {
+    run_on_main_named_thread(async {
+        let service = Arc::new(RpcService::<ThreadModeRawMutex, u32, u32>::new());
+
+        let server = {
+            let service = Arc::clone(&service);
+            async move {
+                // One in-flight RPC at a time: after the cancelled client is cleaned up, this
+                // `serve` receives the next client's request.
+                let req = service.serve().await;
+                let n = *req;
+                req.respond(n.saturating_add(10));
+            }
+        };
+
+        let client_cancelled = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.request(1).await })
+        };
+
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        client_cancelled.abort();
+        let _ = client_cancelled.await;
+
+        let client_ok = {
+            let service = Arc::clone(&service);
+            async move { service.request(2).await }
+        };
+
+        let (_, r) = timeout(Duration::from_secs(1), async { join!(server, client_ok) })
+            .await
+            .expect("operation timed out");
+
+        assert_eq!(r, Ok(12));
+    });
+}
+
+#[test]
+fn cancelled_client_after_server_takes_request_releases_slot_on_respond() {
+    run_on_main_named_thread(async {
+        let service = Arc::new(RpcService::<ThreadModeRawMutex, u32, u32>::new());
+        let (tx, rx) = oneshot::channel();
+
+        let svc_server = Arc::clone(&service);
+        let server = tokio::spawn(async move {
+            let req = svc_server.serve().await;
+            tx.send(()).expect("signal client");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            req.respond(99);
+            let req2 = svc_server.serve().await;
+            req2.respond(7);
+        });
+
+        let client_cancelled = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.request(1).await })
+        };
+
+        timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("timed out waiting for server")
+            .expect("channel closed");
+
+        client_cancelled.abort();
+        let _ = client_cancelled.await;
+
+        let client_ok = {
+            let service = Arc::clone(&service);
+            async move { service.request(2).await }
+        };
+
+        let (_, r) = timeout(Duration::from_secs(1), async {
+            join!(
+                async move { server.await.expect("server task panicked") },
+                client_ok
+            )
+        })
+        .await
+        .expect("operation timed out");
+
+        assert_eq!(r, Ok(7));
+    });
+}
+
+#[test]
+fn cancelled_client_after_server_takes_request_releases_slot_on_server_drop() {
+    run_on_main_named_thread(async {
+        let service = Arc::new(RpcService::<ThreadModeRawMutex, u32, u32>::new());
+        let (tx, rx) = oneshot::channel();
+
+        let server_drop = {
+            let service = Arc::clone(&service);
+            async move {
+                let _req = service.serve().await;
+                tx.send(()).expect("signal client");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                // Drop without respond — client was cancelled, so this only frees the slot.
+            }
+        };
+
+        let client_cancelled = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.request(1).await })
+        };
+
+        let server_handle = tokio::spawn(server_drop);
+
+        timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("timed out waiting for server")
+            .expect("channel closed");
+
+        client_cancelled.abort();
+        let _ = client_cancelled.await;
+
+        timeout(Duration::from_secs(1), server_handle)
+            .await
+            .expect("server_drop timed out")
+            .expect("server task panicked");
+
+        let svc = Arc::clone(&service);
+        let (_, r) = timeout(Duration::from_secs(1), async {
+            join!(
+                async move {
+                    let req = svc.serve().await;
+                    req.respond(42);
+                },
+                async move { service.request(2).await }
+            )
+        })
+        .await
+        .expect("second RPC timed out");
+
+        assert_eq!(r, Ok(42));
     });
 }
