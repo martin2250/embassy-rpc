@@ -1,4 +1,5 @@
 #![no_std]
+#![doc = include_str!("../Readme.md")]
 
 use core::cell::RefCell;
 use core::future::poll_fn;
@@ -8,15 +9,39 @@ use core::task::Waker;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
-/// Error returned to the client when a served request is dropped
-/// without producing a response.
+/// Error returned to the client when the server drops [`ServedRequest`] without calling
+/// [`ServedRequest::respond`].
+///
+/// This is not a transport error: it means the server-side handler gave up without sending a
+/// successful response (for example by returning early or unwinding after `serve`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestDroppedError;
 
-/// Minimal RPC-like synchronization primitive for request/response.
+/// In-memory request/response synchronization for async tasks.
 ///
-/// This POC supports one in-flight request at a time. Multiple clients can
-/// call `request()`, but they are serialized internally.
+/// This type is **not** a wire protocol. It connects a client async task that calls
+/// [`RpcService::request`] with a server task that calls [`RpcService::serve`], using a
+/// [`embassy_sync::blocking_mutex::Mutex`] and async wakers. It is suitable for `no_std` use when
+/// paired with a mutex implementation appropriate for your platform ([`RawMutex`]).
+///
+/// # Concurrency
+///
+/// - **Single in-flight RPC:** Internal state holds at most one queued request and one response
+///   slot. Design for one active request/response pair at a time.
+/// - **Multiple clients:** Several tasks may call [`request`](Self::request); additional callers
+///   wait until the current RPC completes (including delivery of [`RequestDroppedError`]).
+///
+/// # Type parameters
+///
+/// - **`M`:** Mutex raw type ([`RawMutex`]), e.g. `CriticalSectionRawMutex` on many MCUs.
+/// - **`Req` / `Resp`:** Your message types. `Req` may borrow from the client for the duration of
+///   the call; then the [`RpcService`] must not outlive those borrows (often modeled with a
+///   stack-scoped service—see the crate README).
+///
+/// # Panics
+///
+/// [`ServedRequest::into_inner`] and [`ServedRequest`]'s [`Deref`] / [`DerefMut`] implementations
+/// panic if the inner request was already taken.
 pub struct RpcService<M, Req, Resp>
 where
     M: RawMutex,
@@ -50,13 +75,22 @@ impl<M, Req, Resp> RpcService<M, Req, Resp>
 where
     M: RawMutex,
 {
+    /// Creates an empty service. Safe to call in `const` contexts (e.g. `static` initializer).
     pub const fn new() -> Self {
         Self {
             state: Mutex::new(RefCell::new(State::new())),
         }
     }
 
-    /// Send a request and wait for either response or drop-notification.
+    /// Sends `req` and waits until the server responds or drops the [`ServedRequest`].
+    ///
+    /// If another client is already in an RPC, this call waits until that RPC fully completes
+    /// (including waking the next waiter for the client slot) before sending `req`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(RequestDroppedError)`](RequestDroppedError) if the server drops
+    /// [`ServedRequest`] without calling [`ServedRequest::respond`].
     pub async fn request(&self, req: Req) -> Result<Resp, RequestDroppedError> {
         self.acquire_client_slot().await;
 
@@ -88,7 +122,11 @@ where
         result
     }
 
-    /// Wait for the next request from clients.
+    /// Waits until a client submits a request via [`Self::request`], then returns it wrapped in
+    /// [`ServedRequest`].
+    ///
+    /// The server must eventually call [`ServedRequest::respond`] or drop the handle; dropping
+    /// notifies the client with [`RequestDroppedError`].
     pub async fn serve(&self) -> ServedRequest<'_, M, Req, Resp> {
         let req = poll_fn(|cx| {
             self.state.lock(|state| {
@@ -127,10 +165,20 @@ where
     }
 }
 
-/// Server-side request wrapper.
+/// Server-side handle for one request taken from [`RpcService::serve`].
 ///
-/// Deref/DerefMut are implemented to make working with the inner request ergonomic.
-/// If dropped without calling `respond`, the client gets `RequestDroppedError`.
+/// Dereferences to the inner `Req` via [`Deref`] and [`DerefMut`] for ergonomic access.
+///
+/// # Completion
+///
+/// - Call [`Self::respond`] with a successful `Resp` to complete the RPC.
+/// - Drop this value without calling [`Self::respond`] to complete the RPC with
+///   [`RequestDroppedError`] on the client.
+///
+/// # Panics
+///
+/// [`Deref::deref`], [`DerefMut::deref_mut`], and [`Self::into_inner`] panic if the inner request
+/// was already consumed (for example after [`Self::respond`]).
 pub struct ServedRequest<'a, M, Req, Resp>
 where
     M: RawMutex,
@@ -144,6 +192,9 @@ impl<'a, M, Req, Resp> ServedRequest<'a, M, Req, Resp>
 where
     M: RawMutex,
 {
+    /// Completes the RPC with `resp` and consumes `self`.
+    ///
+    /// The waiting client receives `Ok(resp)`.
     pub fn respond(mut self, resp: Resp) {
         self.state.lock(|state| {
             let mut state = state.borrow_mut();
@@ -156,6 +207,17 @@ where
         self.completed = true;
     }
 
+    /// Extracts the inner request value, consuming `self`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inner value was already taken (for example after [`Self::respond`]).
+    ///
+    /// # Effect on the client
+    ///
+    /// This does not send a successful response. When `self` is dropped after this call, the
+    /// waiting client receives [`Err(RequestDroppedError)`](RequestDroppedError) (same as dropping
+    /// [`ServedRequest`] without calling [`Self::respond`]).
     pub fn into_inner(mut self) -> Req {
         self.req
             .take()

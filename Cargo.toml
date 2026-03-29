@@ -2,6 +2,8 @@
 name = "embassy-rpc"
 version = "0.1.0"
 edition = "2024"
+readme = "Readme.md"
+description = "no_std async request/response synchronization (Embassy-style)"
 
 [dependencies]
 embassy-sync = "0.8"
