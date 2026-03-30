@@ -79,4 +79,4 @@ Run `server_task` and `client_task` **concurrently** on the same `service` (spaw
 
 ## License
 
-See the repository for license terms.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

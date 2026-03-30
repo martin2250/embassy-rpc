@@ -2,8 +2,15 @@
 name = "embassy-rpc"
 version = "0.1.0"
 edition = "2024"
-readme = "Readme.md"
+rust-version = "1.85"
+readme = "README.md"
 description = "no_std async request/response synchronization (Embassy-style)"
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/embassy-rpc"
+keywords = ["no-std", "embassy", "async", "rpc", "embedded"]
+categories = ["embedded", "no-std", "asynchronous"]
+authors = ["Martin Pittermann"]
+repository = "https://github.com/martin2250/embassy-rpc"
 
 [dependencies]
 embassy-sync = "0.8"

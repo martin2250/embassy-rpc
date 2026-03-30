@@ -1,5 +1,5 @@
 #![no_std]
-#![doc = include_str!("../Readme.md")]
+#![doc = include_str!("../README.md")]
 
 use core::cell::RefCell;
 use core::future::poll_fn;
