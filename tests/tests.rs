@@ -49,11 +49,11 @@ fn server_writes_through_client_buffer_slice() {
             let service = RpcService::<ThreadModeRawMutex, BufferRequest<'_>, ()>::new();
 
             let server = async {
-                let mut req = service.serve().await;
+                let (req, served) = service.serve().await;
                 req.buffer[0] = 0xab;
                 req.buffer[1] = 0xcd;
                 req.buffer[2..].fill(0x7e);
-                req.respond(());
+                served.respond(());
             };
 
             let client = async { service.request(BufferRequest { buffer: &mut buf }).await };
@@ -75,8 +75,8 @@ fn round_trip_response_is_delivered() {
         let server = {
             let service = Arc::clone(&service);
             async move {
-                let req = service.serve().await;
-                req.respond(10);
+                let (_, served) = service.serve().await;
+                served.respond(10);
             }
         };
 
@@ -98,7 +98,7 @@ fn dropped_request_returns_error() {
         let server = {
             let service = Arc::clone(&service);
             async move {
-                let _req = service.serve().await;
+                let (_, _served) = service.serve().await;
                 // Dropped intentionally without respond().
             }
         };
@@ -121,8 +121,8 @@ fn server_can_wait_before_client_requests() {
         let server = {
             let service = Arc::clone(&service);
             async move {
-                let req = service.serve().await;
-                req.respond(123);
+                let (_, served) = service.serve().await;
+                served.respond(123);
             }
         };
 
@@ -154,9 +154,8 @@ fn concurrent_clients_are_serialized_and_complete() {
             let service = Arc::clone(&service);
             async move {
                 for _ in 0..2 {
-                    let req = service.serve().await;
-                    let value = *req;
-                    req.respond(value + 1);
+                    let (req, served) = service.serve().await;
+                    served.respond(req + 1);
                 }
             }
         };
@@ -193,9 +192,8 @@ fn cancelled_client_before_server_takes_request_releases_slot() {
             async move {
                 // One in-flight RPC at a time: after the cancelled client is cleaned up, this
                 // `serve` receives the next client's request.
-                let req = service.serve().await;
-                let n = *req;
-                req.respond(n.saturating_add(10));
+                let (n, served) = service.serve().await;
+                served.respond(n.saturating_add(10));
             }
         };
 
@@ -230,12 +228,12 @@ fn cancelled_client_after_server_takes_request_releases_slot_on_respond() {
 
         let svc_server = Arc::clone(&service);
         let server = tokio::spawn(async move {
-            let req = svc_server.serve().await;
+            let (_, served) = svc_server.serve().await;
             tx.send(()).expect("signal client");
             tokio::time::sleep(Duration::from_millis(20)).await;
-            req.respond(99);
-            let req2 = svc_server.serve().await;
-            req2.respond(7);
+            served.respond(99);
+            let (_, served2) = svc_server.serve().await;
+            served2.respond(7);
         });
 
         let client_cancelled = {
@@ -278,7 +276,7 @@ fn cancelled_client_after_server_takes_request_releases_slot_on_server_drop() {
         let server_drop = {
             let service = Arc::clone(&service);
             async move {
-                let _req = service.serve().await;
+                let (_, _served) = service.serve().await;
                 tx.send(()).expect("signal client");
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 // Drop without respond — client was cancelled, so this only frees the slot.
@@ -309,8 +307,8 @@ fn cancelled_client_after_server_takes_request_releases_slot_on_server_drop() {
         let (_, r) = timeout(Duration::from_secs(1), async {
             join!(
                 async move {
-                    let req = svc.serve().await;
-                    req.respond(42);
+                    let (_, served) = svc.serve().await;
+                    served.respond(42);
                 },
                 async move { service.request(2).await }
             )

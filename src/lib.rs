@@ -3,7 +3,6 @@
 
 use core::cell::RefCell;
 use core::future::poll_fn;
-use core::ops::{Deref, DerefMut};
 use core::task::Waker;
 
 use embassy_sync::blocking_mutex::Mutex;
@@ -42,11 +41,6 @@ pub struct RequestDroppedError;
 /// - **`Req` / `Resp`:** Your message types. `Req` may borrow from the client for the duration of
 ///   the call; then the [`RpcService`] must not outlive those borrows (often modeled with a
 ///   stack-scoped service—see the crate README).
-///
-/// # Panics
-///
-/// [`ServedRequest::into_inner`] and [`ServedRequest`]'s [`Deref`] / [`DerefMut`] implementations
-/// panic if the inner request was already taken.
 pub struct RpcService<M, Req, Resp>
 where
     M: RawMutex,
@@ -201,12 +195,12 @@ where
         result
     }
 
-    /// Waits until a client submits a request via [`Self::request`], then returns it wrapped in
-    /// [`ServedRequest`].
+    /// Waits until a client submits a request via [`Self::request`], then returns the request
+    /// value together with a [`ServedRequest`] used to complete or abandon the RPC.
     ///
-    /// The server must eventually call [`ServedRequest::respond`] or drop the handle; dropping
-    /// notifies the client with [`RequestDroppedError`].
-    pub async fn serve(&self) -> ServedRequest<'_, M, Req, Resp> {
+    /// The server must eventually call [`ServedRequest::respond`] on the handle or drop it;
+    /// dropping notifies the client with [`RequestDroppedError`].
+    pub async fn serve(&self) -> (Req, ServedRequest<'_, M, Req, Resp>) {
         let req = poll_fn(|cx| {
             self.state.lock(|state| {
                 let mut state = state.borrow_mut();
@@ -220,11 +214,11 @@ where
         })
         .await;
 
-        ServedRequest {
-            req: Some(req),
+        let served = ServedRequest {
             state: &self.state,
             completed: false,
-        }
+        };
+        (req, served)
     }
 
     async fn acquire_client_slot(&self) {
@@ -253,25 +247,20 @@ where
     }
 }
 
-/// Server-side handle for one request taken from [`RpcService::serve`].
+/// Server-side completion handle for one request taken from [`RpcService::serve`].
 ///
-/// Dereferences to the inner `Req` via [`Deref`] and [`DerefMut`] for ergonomic access.
+/// The request value itself is returned separately from [`RpcService::serve`]; this type only
+/// carries [`Self::respond`] and drop behavior.
 ///
 /// # Completion
 ///
 /// - Call [`Self::respond`] with a successful `Resp` to complete the RPC.
 /// - Drop this value without calling [`Self::respond`] to complete the RPC with
 ///   [`RequestDroppedError`] on the client.
-///
-/// # Panics
-///
-/// [`Deref::deref`], [`DerefMut::deref_mut`], and [`Self::into_inner`] panic if the inner request
-/// was already consumed (for example after [`Self::respond`]).
 pub struct ServedRequest<'a, M, Req, Resp>
 where
     M: RawMutex,
 {
-    req: Option<Req>,
     state: &'a Mutex<M, RefCell<State<Req, Resp>>>,
     completed: bool,
 }
@@ -299,49 +288,7 @@ where
                 }
             }
         });
-        let _ = self.req.take();
         self.completed = true;
-    }
-
-    /// Extracts the inner request value, consuming `self`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner value was already taken (for example after [`Self::respond`]).
-    ///
-    /// # Effect on the client
-    ///
-    /// This does not send a successful response. When `self` is dropped after this call, the
-    /// waiting client receives [`Err(RequestDroppedError)`](RequestDroppedError) (same as dropping
-    /// [`ServedRequest`] without calling [`Self::respond`]).
-    pub fn into_inner(mut self) -> Req {
-        self.req
-            .take()
-            .expect("ServedRequest inner request already taken")
-    }
-}
-
-impl<'a, M, Req, Resp> Deref for ServedRequest<'a, M, Req, Resp>
-where
-    M: RawMutex,
-{
-    type Target = Req;
-
-    fn deref(&self) -> &Self::Target {
-        self.req
-            .as_ref()
-            .expect("ServedRequest inner request already taken")
-    }
-}
-
-impl<'a, M, Req, Resp> DerefMut for ServedRequest<'a, M, Req, Resp>
-where
-    M: RawMutex,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.req
-            .as_mut()
-            .expect("ServedRequest inner request already taken")
     }
 }
 

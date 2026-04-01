@@ -28,17 +28,16 @@ where
 }
 
 #[test]
-fn into_inner_consumes_request_and_client_receives_dropped_error() {
+fn dropping_served_without_respond_sends_dropped_error() {
     run_on_main_named_thread(async {
         let service = Arc::new(RpcService::<ThreadModeRawMutex, u32, u32>::new());
 
         let server = {
             let service = Arc::clone(&service);
             async move {
-                let req = service.serve().await;
-                let inner = req.into_inner();
+                let (inner, _served) = service.serve().await;
                 assert_eq!(inner, 42);
-                // Drop after `into_inner` without `respond`.
+                // Drop `_served` without `respond`.
             }
         };
 
@@ -75,9 +74,8 @@ fn cancelled_client_before_server_takes_request_wakes_waiting_slot_client() {
         let server = {
             let service = Arc::clone(&service);
             tokio::spawn(async move {
-                let req = service.serve().await;
-                let n = *req;
-                req.respond(n + 10);
+                let (n, served) = service.serve().await;
+                served.respond(n + 10);
             })
         };
 
@@ -104,14 +102,14 @@ fn cancelled_client_after_server_takes_request_and_responds_wakes_waiting_slot_c
         let server = {
             let service = Arc::clone(&service);
             tokio::spawn(async move {
-                let req = service.serve().await;
+                let (_, served) = service.serve().await;
                 taken_tx.send(()).expect("signal that request was taken");
 
                 continue_rx.await.expect("continue signal");
-                req.respond(99);
+                served.respond(99);
 
-                let req2 = service.serve().await;
-                req2.respond(7);
+                let (_, served2) = service.serve().await;
+                served2.respond(7);
             })
         };
 
@@ -163,14 +161,14 @@ fn cancelled_client_after_server_takes_request_and_drops_wakes_waiting_slot_clie
             let service = Arc::clone(&service);
             tokio::spawn(async move {
                 {
-                    let _req = service.serve().await;
+                    let (_, _served) = service.serve().await;
                     taken_tx.send(()).expect("signal that request was taken");
                     continue_rx.await.expect("continue signal");
                     // Drop without respond after client was cancelled.
                 }
 
-                let req2 = service.serve().await;
-                req2.respond(42);
+                let (_, served2) = service.serve().await;
+                served2.respond(42);
             })
         };
 
