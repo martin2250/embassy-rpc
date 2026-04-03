@@ -1,10 +1,10 @@
-//! Integration tests for `embassy-rpc`.
+//! Integration tests for `embedded-rpc`.
 //!
 //! `ThreadModeRawMutex` (with `embassy-sync`’s `std` feature) only allows lock/drop on a thread
 //! whose name is `"main"`. The default Rust test harness runs each test on a worker thread, so
 //! we run the async body on a child thread explicitly named `"main"`.
 
-use embassy_rpc::{RequestDroppedError, RpcService};
+use embedded_rpc::{RequestDroppedError, RpcService};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use std::future::Future;
 use std::sync::Arc;

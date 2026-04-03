@@ -1,6 +1,6 @@
 //! Additional integration tests focused on uncovered control-flow paths.
 
-use embassy_rpc::{RequestDroppedError, RpcService};
+use embedded_rpc::{RequestDroppedError, RpcService};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use std::future::Future;
 use std::sync::Arc;

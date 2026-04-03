@@ -1,6 +1,8 @@
-# embassy-rpc
+# embedded-rpc
 
 `no_std` request/response synchronization for async tasks (Embassy-style executors). This is **not** a wire protocol: it is an in-memory channel built on [`embassy_sync`](https://docs.rs/embassy-sync) mutexes and async wakers.
+
+**Crate rename:** This crate was previously published on [crates.io](https://crates.io) as `embassy-rpc`. Depend on `embedded-rpc` and use the `embedded_rpc` crate root instead of `embassy_rpc`.
 
 ## What this crate does
 
@@ -20,7 +22,7 @@
 ## Example (simple types)
 
 ```rust,ignore
-use embassy_rpc::RpcService;
+use embedded_rpc::RpcService;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 static SERVICE: RpcService<CriticalSectionRawMutex, u32, u32> = RpcService::new();
@@ -35,7 +37,7 @@ async fn server() {
 async fn client() {
     match SERVICE.request(5).await {
         Ok(n) => assert_eq!(n, 6),
-        Err(embassy_rpc::RequestDroppedError) => { /* server dropped the request */ }
+        Err(embedded_rpc::RequestDroppedError) => { /* server dropped the request */ }
     }
 }
 ```
@@ -45,7 +47,7 @@ async fn client() {
 `Req` can carry `&mut [u8]` (or other borrows) so the server writes into the client’s memory for the duration of one RPC. The `RpcService` must live **no longer** than the borrowed data, so keep it on the stack (or in an owning struct) together with the buffer—see the `server_writes_through_client_buffer_slice` integration test in this repository.
 
 ```rust,ignore
-use embassy_rpc::RpcService;
+use embedded_rpc::RpcService;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 struct BufferRequest<'a> {
@@ -61,7 +63,7 @@ async fn server_task(service: &RpcService<CriticalSectionRawMutex, BufferRequest
 async fn client_task(
     service: &RpcService<CriticalSectionRawMutex, BufferRequest<'_>, ()>,
     buf: &mut [u8],
-) -> Result<(), embassy_rpc::RequestDroppedError> {
+) -> Result<(), embedded_rpc::RequestDroppedError> {
     service.request(BufferRequest { buffer: buf }).await
 }
 ```

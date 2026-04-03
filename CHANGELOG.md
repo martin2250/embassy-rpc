@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Crate rename:** The package is now named `embedded-rpc` (Rust identifier `embedded_rpc`). It was previously `embassy-rpc` / `embassy_rpc`. Update `Cargo.toml` (`embedded-rpc = "…"`) and imports (`use embedded_rpc::…`). Documentation is at [docs.rs/embedded-rpc](https://docs.rs/embedded-rpc). The Git repository is now [github.com/martin2250/embedded-rpc](https://github.com/martin2250/embedded-rpc) (rename the remote URL if you still have the old clone path).
+
 ## [0.2.0] - 2026-04-01
 
 ### Changed
